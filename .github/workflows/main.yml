@@ -1,0 +1,170 @@
+# Enhanced CI Workflow
+# Maintains original functionality with improved structure and organization
+
+name: Enhanced CI Pipeline
+
+# Event Configuration
+on:
+  schedule:
+    # Runs every 5 minutes
+    - cron: "*/5 * * * *"
+  push:
+    branches: 
+      - master
+  pull_request:
+    branches:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: 'Enable debug mode'
+        required: false
+        default: 'false'
+        type: boolean
+      environment:
+        description: 'Environment to run tests against'
+        required: false
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+          - development
+
+# Environment Variables
+env:
+  PYTHON_VERSION_MAJOR: "3"
+  PYTHON_VERSION_MINOR: "13"
+  DEBIAN_FRONTEND: noninteractive
+  PY_COLORS: "1"
+  FORCE_COLOR: "1"
+  DEFAULT_LOCALE: "en_US.UTF-8"
+  ARTIFACT_NAME: "seleniumbase-screenshots"
+  CHROME_BINARY: "google-chrome-stable"
+
+jobs:
+  setup-and-test:
+    name: Setup Environment and Run Tests
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+      fail-fast: false
+      max-parallel: 1
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      SETUP_STATUS: "pending"
+      TEST_STATUS: "pending"
+
+    steps:
+    - name: Repository Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Python Environment Setup
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        architecture: x64
+        cache: 'pip'
+        check-latest: true
+
+    - name: System Configuration - Locale Setup
+      run: |
+        echo "🌍 Configuring system locale settings..."
+        sudo apt-get update
+        sudo apt-get install -y tzdata locales
+        sudo locale-gen ${DEFAULT_LOCALE}
+        sudo localectl set-locale LANG="${DEFAULT_LOCALE}"
+        export LANG="${DEFAULT_LOCALE}"
+        sudo update-locale
+        
+        echo "📝 Verifying locale configuration..."
+        locale -a
+        locale
+        locale -c -k LC_NUMERIC
+        localectl status
+
+    - name: Python Dependencies Installation
+      run: |
+        echo "📦 Upgrading package management tools..."
+        python -m pip install --upgrade pip wheel setuptools
+
+        echo "📚 Installing required Python packages..."
+        pip install --upgrade \
+          seleniumbase \
+          pyautogui \
+          pymongo \
+          python-xlib
+
+    - name: Code Quality Check
+      run: |
+        echo "🔍 Installing linting tools..."
+        pip install flake8
+        
+        echo "⚠️ Note: Linting checks are currently commented out"
+        # Uncomment to enable linting
+        # flake8 . --count --show-source --statistics --exclude=temp
+
+    - name: Browser Setup
+      if: success()
+      run: |
+        echo "🌐 Installing Chrome browser..."
+        sudo apt install -y ${CHROME_BINARY}
+        
+        echo "🔧 Verifying SeleniumBase installation..."
+        seleniumbase
+        sbase
+        
+        echo "🚀 Installing ChromeDriver..."
+        seleniumbase install chromedriver
+
+    - name: Cloudflare WARP Setup
+      run: |
+        echo "🌐 Setting up Cloudflare WARP..."
+        
+        # Repository setup
+        curl https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+        
+        # Installation
+        sudo apt update
+        sudo apt install -y cloudflare-warp
+        
+        # WARP configuration
+        echo "🔄 Configuring WARP client..."
+        sudo warp-cli --accept-tos registration new
+        sudo warp-cli --accept-tos connect
+        
+        echo "⏳ Waiting for WARP connection..."
+        sleep 5
+        
+        echo "📊 WARP Status:"
+        sudo warp-cli --accept-tos status
+
+    - name: Execute Test Suite
+      run: |
+        echo "🧪 Running tests with debug mode..."
+        python marku.py --debug --chrome --xvfb --screenshot
+
+    - name: Archive Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ./latest_logs/
+        retention-days: 14
+        if-no-files-found: warn
+        compression-level: 9
+
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "🧹 Performing cleanup..."
+        sudo warp-cli disconnect || true
+        sudo apt clean
+        pip cache purge
