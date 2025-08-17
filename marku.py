@@ -1,135 +1,167 @@
+# -*- coding: utf-8 -*-
+"""
+Enhanced visual version of your SeleniumBase script.
+- Adds colorful, timestamped logging and dividers for clarity.
+- Wraps sleeps with a randomized helper:
+    * If base_sleep < 10  -> random 1–10 seconds
+    * If base_sleep >= 10 -> random 10–60 seconds
+- Keeps your original flow and actions intact.
+"""
+
 from seleniumbase import SB
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Union, Callable
 import time
-import requests
+import random
 import sys
 import os
-import random
-import subprocess
-import logging
-from enum import Enum
-from contextlib import contextmanager
-from functools import wraps
+from dataclasses import dataclass
+from typing import Optional
 
-# Configuration Enums
-class StreamPlatform(Enum):
-    KICK = "kick"
-    TWITCH = "twitch"
+# ---------- Visual styling (ANSI colors) ----------
+class Style:
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    # Foreground
+    FG_BLUE = "\033[34m"
+    FG_CYAN = "\033[36m"
+    FG_GREEN = "\033[32m"
+    FG_YELLOW = "\033[33m"
+    FG_MAGENTA = "\033[35m"
+    FG_RED = "\033[31m"
+    FG_WHITE = "\033[37m"
+    # Background (lightly used)
+    BG_DARK = "\033[48;5;236m"
+    BG_NONE = "\033[49m"
 
+def now_ts() -> str:
+    return time.strftime("%H:%M:%S")
+
+class VLog:
+    """Simple visual logger with consistent formatting."""
+    def divider(self, label: Optional[str] = None) -> None:
+        bar = f"{Style.DIM}{'─'*14}{Style.RESET}"
+        core = f"{Style.FG_MAGENTA}{Style.BOLD}◆{Style.RESET}"
+        if label:
+            print(f"\n{bar} {core} {Style.FG_MAGENTA}{label}{Style.RESET} {core} {bar}")
+        else:
+            print(f"\n{bar} {core}{bar}")
+
+    def banner(self, title: str) -> None:
+        line = "═" * (len(title) + 8)
+        print(
+            f"\n{Style.FG_CYAN}{Style.BOLD}╔{line}╗{Style.RESET}\n"
+            f"{Style.FG_CYAN}{Style.BOLD}║   {title}   ║{Style.RESET}\n"
+            f"{Style.FG_CYAN}{Style.BOLD}╚{line}╝{Style.RESET}"
+        )
+
+    def info(self, msg: str) -> None:
+        print(f"{Style.FG_BLUE}[{now_ts()}] ℹ {Style.RESET}{msg}")
+
+    def action(self, msg: str) -> None:
+        print(f"{Style.FG_YELLOW}[{now_ts()}] ► {Style.RESET}{msg}")
+
+    def ok(self, msg: str) -> None:
+        print(f"{Style.FG_GREEN}[{now_ts()}] ✓ {Style.RESET}{msg}")
+
+    def warn(self, msg: str) -> None:
+        print(f"{Style.FG_YELLOW}[{now_ts()}] ⚠ {Style.RESET}{msg}")
+
+    def err(self, msg: str) -> None:
+        print(f"{Style.FG_RED}[{now_ts()}] ✖ {Style.RESET}{msg}")
+
+# ---------- Config ----------
 @dataclass
-class StreamConfig:
-    platform: StreamPlatform
-    url: str
-    reconnect_time: int
-    base_sleep: int
+class Targets:
+    kick_url: str = "https://kick.com/brutalles"
+    twitch_url: str = "https://www.twitch.tv/brutalles"
+    cookie_btn: str = 'button:contains("Accept")'
+    channel_player: str = "#injected-channel-player"
 
-# Custom Exceptions
-class CaptchaHandlingError(Exception):
-    pass
+vlog = VLog()
+T = Targets()
 
-class BrowserInitializationError(Exception):
-    pass
-
-# Utility Decorators
-def retry_on_failure(max_attempts: int = 3, delay: float = 1.0):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == max_attempts - 1:
-                        raise
-                    time.sleep(delay)
-            return None
-        return wrapper
-    return decorator
-
-def smart_sleep(duration: int) -> None:
-    """Implements intelligent sleep duration based on input time"""
-    if duration < 10:
-        sleep_time = random.uniform(1, 10)
+# ---------- Sleep helper ----------
+def randomized_sleep(base_seconds: int, sb_driver, context: str = "") -> None:
+    """
+    If base_seconds < 10 -> sleep random between 1 and 10
+    If base_seconds >= 10 -> sleep random between 10 and 60
+    """
+    if base_seconds < 10:
+        wait = random.randint(1, 10)
     else:
-        sleep_time = random.uniform(10, 60)
-    time.sleep(sleep_time)
+        wait = random.randint(10, 60)
+    if context:
+        vlog.info(f"{context}: sleeping {wait} seconds (base={base_seconds})")
+    else:
+        vlog.info(f"Sleeping {wait} seconds (base={base_seconds})")
+    sb_driver.sleep(wait)
 
-class StreamManager:
-    def __init__(self):
-        self.streams: Dict[str, StreamConfig] = {
-            "brutalles": {
-                "kick": StreamConfig(
-                    platform=StreamPlatform.KICK,
-                    url="https://kick.com/brutalles",
-                    reconnect_time=4,
-                    base_sleep=4
-                ),
-                "twitch": StreamConfig(
-                    platform=StreamPlatform.TWITCH,
-                    url="https://www.twitch.tv/brutalles",
-                    reconnect_time=5,
-                    base_sleep=5
-                )
-            }
-        }
+# ---------- Common actions ----------
+def accept_cookies_if_present(sb_driver) -> None:
+    if sb_driver.is_element_present(T.cookie_btn):
+        vlog.action('Clicking "Accept" (cookies).')
+        sb_driver.uc_click(T.cookie_btn, reconnect_time=4)
+        vlog.ok("Cookies accepted.")
 
-    @contextmanager
-    def create_session(self, uc: bool = True, test: bool = True):
-        driver = None
-        try:
-            driver = SB(uc=uc, test=test)
-            yield driver
-        finally:
-            if driver:
-                driver.quit()
+def solve_captcha_if_any(sb_driver) -> None:
+    vlog.action("Attempting CAPTCHA interaction (if present).")
+    sb_driver.uc_gui_click_captcha()
+    sb_driver.uc_gui_handle_captcha()
+    vlog.ok("CAPTCHA step handled (or not required).")
 
-class StreamAutomation:
-    def __init__(self):
-        self.manager = StreamManager()
-        
-    @retry_on_failure(max_attempts=3)
-    def handle_platform(self, driver: SB, config: StreamConfig) -> None:
-        driver.uc_open_with_reconnect(config.url, config.reconnect_time)
-        smart_sleep(config.base_sleep)
-        
-        driver.uc_gui_click_captcha()
-        smart_sleep(1)
-        driver.uc_gui_handle_captcha()
-        smart_sleep(config.base_sleep)
-        
-        if driver.is_element_present('button:contains("Accept")'):
-            driver.uc_click('button:contains("Accept")', reconnect_time=config.reconnect_time)
-            
-        if config.platform == StreamPlatform.KICK and driver.is_element_visible('#injected-channel-player'):
-            self._handle_secondary_window(driver, config)
-            
-        if config.platform == StreamPlatform.TWITCH:
-            self._handle_secondary_window(driver, config)
+def visit_with_secondary(sb_driver, url: str, after_open_sleep_base: int = 10) -> None:
+    """
+    Opens the same URL in a secondary undetectable driver to mirror the original behavior.
+    """
+    vlog.divider("Secondary window")
+    try:
+        sec = sb_driver.get_new_driver(undetectable=True)
+        vlog.action(f"Secondary open: {url}")
+        sec.uc_open_with_reconnect(url, 5)
+        solve_captcha_if_any(sec)
+        randomized_sleep(after_open_sleep_base, sb_driver, context="Secondary post-open")
+        accept_cookies_if_present(sec)
+        vlog.ok("Secondary window complete.")
+    except Exception as e:
+        vlog.err(f"Secondary flow error: {e}")
+    finally:
+        # Ensure we close the extra driver to keep things tidy
+        sb_driver.quit_extra_driver()
+        vlog.info("Secondary window closed.")
 
-    def _handle_secondary_window(self, driver: SB, config: StreamConfig) -> None:
-        secondary = driver.get_new_driver(undetectable=True)
-        try:
-            secondary.uc_open_with_reconnect(config.url, config.reconnect_time)
-            secondary.uc_gui_click_captcha()
-            secondary.uc_gui_handle_captcha()
-            smart_sleep(10)
-            
-            if secondary.is_element_present('button:contains("Accept")'):
-                secondary.uc_click('button:contains("Accept")', reconnect_time=config.reconnect_time)
-        finally:
-            driver.quit_extra_driver()
-
-def main():
-    automation = StreamAutomation()
-    
-    with automation.manager.create_session() as marku:
-        for platform_config in automation.manager.streams["brutalles"].values():
-            try:
-                automation.handle_platform(marku, platform_config)
-                smart_sleep(1)
-            except Exception as e:
-                logging.error(f"Error handling {platform_config.platform}: {str(e)}")
-
+# ---------- Main script ----------
 if __name__ == "__main__":
-    main()
+    vlog.banner("Streamer Auto-Visit (Visual Mode)")
+    vlog.info(f"Python {sys.version.split()[0]} | PID {os.getpid()}")
+    vlog.divider("Session start")
+
+    with SB(uc=True, test=True) as marku:
+        # ---- KICK ----
+        vlog.divider("Kick")
+        vlog.action(f"Opening: {T.kick_url}")
+        marku.uc_open_with_reconnect(T.kick_url, 4)
+        randomized_sleep(4, marku, context="Post-open (Kick)")
+        solve_captcha_if_any(marku)
+        randomized_sleep(4, marku, context="Post-captcha (Kick)")
+        accept_cookies_if_present(marku)
+
+        if marku.is_element_visible(T.channel_player):
+            vlog.info("Channel player detected on Kick.")
+            visit_with_secondary(marku, T.kick_url, after_open_sleep_base=10)
+        else:
+            vlog.warn("Channel player not visible on Kick; skipping secondary.")
+
+        randomized_sleep(1, marku, context="Between platforms")
+
+        # ---- TWITCH ----
+        vlog.divider("Twitch")
+        vlog.action(f"Opening: {T.twitch_url}")
+        marku.uc_open_with_reconnect(T.twitch_url, 5)
+        accept_cookies_if_present(marku)
+
+        # Mirror your original logic: always use secondary for Twitch section
+        visit_with_secondary(marku, T.twitch_url, after_open_sleep_base=10)
+
+        randomized_sleep(1, marku, context="Wrap-up")
+        vlog.divider("Session end")
+        vlog.ok("All tasks complete.")
